@@ -2183,19 +2183,38 @@ function renderHistory() {
       if (!v) return;
       const isSeedPerf = v.id && v.id.startsWith('perf_') && !v.userAdded;
       if (isSeedPerf) {
-        if (confirm('이 회차는 전체 공연 시드 데이터입니다.\n삭제 대신 본인 관극 기록(만남·관극 표시)만 비울까요?')) {
-          snapshotForUndo('관극 기록 비움');
-          v.entries = [];
-          v.isWatched = false;
-          touchVisit(v);
-          queueVisitStatePush(v.id);
-          saveState(); renderHistory(); renderHeader(); showToast('내 기록이 비워졌습니다');
+        if (currentUserIsAdmin) {
+          // Admin sees a choice: clear my entries OR delete the seed perf entirely
+          const choice = confirm('관리자입니다. 이 시드 공연 회차를 *완전히 삭제*하시려면 OK,\n본인 관극 기록만 비우려면 취소를 누르세요.');
+          if (choice) {
+            snapshotForUndo('시드 회차 완전 삭제');
+            const removedId = v.id;
+            state.visits = state.visits.filter(x => x.id !== removedId);
+            queuePerformancePush(removedId);  // triggers delete
+            saveState(); renderHistory(); renderHeader(); showToast('시드 회차 삭제됨');
+          } else {
+            snapshotForUndo('관극 기록 비움');
+            v.entries = [];
+            v.isWatched = false;
+            touchVisit(v);
+            queueVisitStatePush(v.id);
+            saveState(); renderHistory(); renderHeader(); showToast('내 기록이 비워졌습니다');
+          }
+        } else {
+          if (confirm('이 회차는 전체 공연 시드 데이터입니다.\n삭제 대신 본인 관극 기록(만남·관극 표시)만 비울까요?')) {
+            snapshotForUndo('관극 기록 비움');
+            v.entries = [];
+            v.isWatched = false;
+            touchVisit(v);
+            queueVisitStatePush(v.id);
+            saveState(); renderHistory(); renderHeader(); showToast('내 기록이 비워졌습니다');
+          }
         }
       } else {
         if (confirm('이 회차 기록을 완전히 삭제할까요?')) {
           snapshotForUndo('회차 삭제');
           state.visits = state.visits.filter(x => x.id !== b.dataset.delete);
-          queueAddedVisitPush(b.dataset.delete);  // will trigger delete on Supabase
+          queueAddedVisitPush(b.dataset.delete);
           saveState(); renderHistory(); renderHeader(); showToast('삭제됨');
         }
       }
@@ -2285,6 +2304,8 @@ function renderHistory() {
       saveState();
       if (v.userAdded || (v.id && !v.id.startsWith('perf_'))) {
         queueAddedVisitPush(v.id);
+      } else if (currentUserIsAdmin && v.id && v.id.startsWith('perf_')) {
+        queuePerformancePush(v.id);
       }
     });
   });
@@ -2311,8 +2332,9 @@ function renderHistory() {
     saveState();
     if (v.userAdded || (v.id && !v.id.startsWith('perf_'))) {
       queueAddedVisitPush(v.id);
-    } else if (currentUserIsAdmin) {
-      // Admin editing seed performance casting — handled by raise admin-push (TODO round 2 admin write)
+    } else if (currentUserIsAdmin && v.id && v.id.startsWith('perf_')) {
+      // Admin editing seed performance casting
+      queuePerformancePush(v.id);
     }
   }
   $$('select[data-edit-vid]').forEach(sel => {
@@ -2529,21 +2551,35 @@ $('#confirmNewPerf').addEventListener('click', () => {
     .reduce((mx, v) => Math.max(mx, v.perfNum), 0);
   const newPerfNum = maxPerfNum + 1;
 
-  const id = `perf_${date}${matineeSuffix}_user_${Date.now()}`;
+  // ID format: admin-added becomes seed perf (perf_...), user-added becomes user_added_visits (v_user_...)
+  const isAdminAdding = currentUserIsAdmin;
+  const id = isAdminAdding
+    ? `perf_${date}${matineeSuffix}_admin_${Date.now()}`
+    : `vuser_${date}${matineeSuffix}_${Date.now()}`;
   let finalNotes = matinee || '';
   if (notes) finalNotes += (finalNotes ? ' · ' : '') + notes;
 
-  state.visits.push({
+  const newVisit = {
     id, date, notes: finalNotes,
     entries: [], casting,
     isLegacy: false, isWatched,
     perfNum: newPerfNum, matinee,
-    userAdded: true
-  });
+    userAdded: !isAdminAdding,
+    source: isAdminAdding ? 'seed_perf' : 'user_visit',
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  state.visits.push(newVisit);
   saveState();
+  if (isAdminAdding) {
+    queuePerformancePush(id);
+  } else {
+    queueAddedVisitPush(id);
+  }
   $('#newPerfForm').style.display = 'none';
   renderHistory();
   renderHeader();
+  populateVisitSelector();
   showToast(`Nº ${newPerfNum} 추가됨`);
 });
 
@@ -3182,6 +3218,7 @@ function renderPoolEditor() {
         else delete c.actorMeta[actor][field];
         if (Object.keys(c.actorMeta[actor]).length === 0) delete c.actorMeta[actor];
         saveState();
+        queueCharacterPush(c.name);
         showToast('저장됨');
       });
     });
@@ -3193,6 +3230,7 @@ function renderPoolEditor() {
         c.actors = c.actors.filter(a => a !== actor);
         if (c.actorMeta) delete c.actorMeta[actor];
         saveState();
+        queueCharacterPush(c.name);
         renderPoolEditor();
         renderSelected(); renderCastingInputs();
         showToast(`${actor} 제거됨`);
@@ -3223,6 +3261,7 @@ function renderPoolEditor() {
           c.actorMeta[name] = meta;
         }
         saveState();
+        queueCharacterPush(c.name);
         renderPoolEditor();
         renderSelected(); renderCastingInputs();
         showToast(`${name} 추가됨`);
@@ -3246,6 +3285,7 @@ function renderPoolEditor() {
           c.actorMeta[name] = meta;
         }
         saveState();
+        queueCharacterPush(c.name);
         renderPoolEditor();
         renderSelected(); renderCastingInputs();
         showToast(`${name} 추가됨`);
@@ -3348,6 +3388,7 @@ function renderScenePool() {
       if (newName === scene.role) return;
       scene.role = newName;
       saveState();
+      queueScenePush(scene.id);
       showToast('이름 변경됨');
     });
     nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') nameInput.blur(); });
@@ -3357,6 +3398,7 @@ function renderScenePool() {
         const actor = x.dataset.removeActor;
         scene.actors = scene.actors.filter(a => a !== actor);
         saveState();
+        queueScenePush(scene.id);
         renderScenePool();
         showToast(`${actor} 제거됨`);
       });
@@ -3377,6 +3419,7 @@ function renderScenePool() {
         if (scene.actors.includes(name)) { showToast('이미 풀에 있음'); return; }
         scene.actors.push(name);
         saveState();
+        queueScenePush(scene.id);
         renderScenePool();
         showToast(`${name} 추가됨`);
       });
@@ -3389,6 +3432,7 @@ function renderScenePool() {
         if (scene.actors.includes(name)) { showToast('이미 풀에 있음'); return; }
         scene.actors.push(name);
         saveState();
+        queueScenePush(scene.id);
         renderScenePool();
         showToast(`${name} 추가됨`);
       });
@@ -3401,6 +3445,7 @@ function renderScenePool() {
         if (!confirm(`'${scene.role}'을(를) 조합 장면으로 변환할까요?\n각 캐릭터를 추가하면 회차 기록 시 캐릭터별로 배우를 선택할 수 있게 됩니다.`)) return;
         scene.composedOf = [];
         saveState();
+        queueScenePush(scene.id);
         renderScenePool();
       });
     }
@@ -3410,6 +3455,7 @@ function renderScenePool() {
         const ci = parseInt(x.dataset.removeComponent);
         scene.composedOf.splice(ci, 1);
         saveState();
+        queueScenePush(scene.id);
         renderScenePool();
         showToast('캐릭터 제거됨');
       });
@@ -3425,6 +3471,7 @@ function renderScenePool() {
         if (scene.composedOf.includes(cn)) { showToast('이미 포함된 캐릭터'); return; }
         scene.composedOf.push(cn);
         saveState();
+        queueScenePush(scene.id);
         renderScenePool();
         showToast(`${cn} 추가됨`);
       });
@@ -3436,6 +3483,7 @@ function renderScenePool() {
         if (!confirm('이 장면의 조합 설정을 해제할까요? (개별 배우 풀로 되돌아갑니다)')) return;
         delete scene.composedOf;
         saveState();
+        queueScenePush(scene.id);
         renderScenePool();
         showToast('조합 해제됨');
       });
@@ -3450,6 +3498,7 @@ function renderScenePool() {
       if (!confirm(msg)) return;
       state.scenes = state.scenes.filter(s => s.id !== sceneId);
       saveState();
+      queueScenePush(sceneId);  // pushes delete since scene no longer in state
       renderScenePool();
       showToast('장면 삭제됨');
     });
@@ -3466,12 +3515,14 @@ $('#addNewScene').addEventListener('click', () => {
   if (state.scenes.some(s => s.role === name && s.type === type)) {
     showToast('같은 이름의 장면이 이미 있어요'); return;
   }
+  const newId = nextSceneId();
   state.scenes.push({
-    id: nextSceneId(),
+    id: newId,
     type, role: name,
     actors: [], legacy_counts: {}, userAdded: true
   });
   saveState();
+  queueScenePush(newId);
   $('#newSceneName').value = '';
   renderScenePool();
   showToast(`'${name}' 추가됨`);
@@ -3741,6 +3792,7 @@ function renderPerformers() {
       else delete state.performerCheckins[actor][field];
       if (Object.keys(state.performerCheckins[actor]).length === 0) delete state.performerCheckins[actor];
       saveState();
+      queueCheckinPush(actor);
       if (field === 'status' || field === 'checkIn' || field === 'checkOut') {
         renderPerformers();
       }
@@ -4787,6 +4839,156 @@ async function flushPushQueue() {
     const { error } = await sb.from('user_added_visits').delete().eq('user_id', uid).in('visit_id', avDeletes);
     if (error) console.error('added-visit delete error', error);
   }
+
+  // 4. ADMIN: characters, scenes, performances, performer_checkins
+  if (currentUserIsAdmin) {
+    // 4a. characters
+    if (adminPushQueue.characters.size > 0) {
+      const rows = [];
+      const deletes = [];
+      adminPushQueue.characters.forEach(name => {
+        const c = state.characters.find(x => x.name === name);
+        if (c) {
+          const idx = state.characters.indexOf(c);
+          rows.push({
+            name: c.name,
+            sort_idx: idx,
+            actors: c.actors || [],
+            actor_meta: c.actorMeta || {}
+          });
+        } else {
+          deletes.push(name);
+        }
+      });
+      adminPushQueue.characters.clear();
+      if (rows.length > 0) {
+        const { error } = await sb.from('characters').upsert(rows, { onConflict: 'name' });
+        if (error) console.error('characters push error', error);
+      }
+      if (deletes.length > 0) {
+        const { error } = await sb.from('characters').delete().in('name', deletes);
+        if (error) console.error('characters delete error', error);
+      }
+    }
+    // 4b. scenes
+    if (adminPushQueue.scenes.size > 0) {
+      const rows = [];
+      const deletes = [];
+      adminPushQueue.scenes.forEach(sid => {
+        const s = state.scenes.find(x => x.id === sid);
+        if (s) {
+          rows.push({
+            id: s.id,
+            type: s.type,
+            role: s.role,
+            actors: s.actors || [],
+            legacy_counts: s.legacy_counts || {},
+            composed_of: s.composedOf || null,
+            free_combo: s.freeCombo || null,
+            sort_idx: s.sortIdx || 999,
+            user_added: !!s.userAdded
+          });
+        } else {
+          deletes.push(sid);
+        }
+      });
+      adminPushQueue.scenes.clear();
+      if (rows.length > 0) {
+        const { error } = await sb.from('scenes').upsert(rows, { onConflict: 'id' });
+        if (error) console.error('scenes push error', error);
+      }
+      if (deletes.length > 0) {
+        const { error } = await sb.from('scenes').delete().in('id', deletes);
+        if (error) console.error('scenes delete error', error);
+      }
+    }
+    // 4c. performances (seed perf casting edits, etc)
+    if (adminPushQueue.performances.size > 0) {
+      const rows = [];
+      const deletes = [];
+      adminPushQueue.performances.forEach(pid => {
+        const v = state.visits.find(x => x.id === pid);
+        if (v && v.id && v.id.startsWith('perf_')) {
+          rows.push({
+            id: v.id,
+            date: v.date || null,
+            matinee: v.matinee || null,
+            perf_num: v.perfNum || null,
+            notes: v.notes || '',
+            casting: v.casting || {}
+          });
+        } else if (!v) {
+          deletes.push(pid);
+        }
+      });
+      adminPushQueue.performances.clear();
+      if (rows.length > 0) {
+        const { error } = await sb.from('performances').upsert(rows, { onConflict: 'id' });
+        if (error) console.error('performances push error', error);
+      }
+      if (deletes.length > 0) {
+        const { error } = await sb.from('performances').delete().in('id', deletes);
+        if (error) console.error('performances delete error', error);
+      }
+    }
+    // 4d. performer check-ins
+    if (adminPushQueue.checkins.size > 0) {
+      const rows = [];
+      const deletes = [];
+      adminPushQueue.checkins.forEach(actor => {
+        const c = state.performerCheckins[actor];
+        if (c && Object.keys(c).length > 0) {
+          rows.push({
+            actor_name: actor,
+            check_in: c.checkIn || null,
+            check_out: c.checkOut || null,
+            status: c.status || null,
+            notes: c.notes || ''
+          });
+        } else {
+          deletes.push(actor);
+        }
+      });
+      adminPushQueue.checkins.clear();
+      if (rows.length > 0) {
+        const { error } = await sb.from('performer_checkins').upsert(rows, { onConflict: 'actor_name' });
+        if (error) console.error('checkins push error', error);
+      }
+      if (deletes.length > 0) {
+        const { error } = await sb.from('performer_checkins').delete().in('actor_name', deletes);
+        if (error) console.error('checkins delete error', error);
+      }
+    }
+  }
+}
+
+// Admin push queues (separate from user-data queues)
+const adminPushQueue = {
+  characters: new Set(),  // by name
+  scenes: new Set(),      // by id
+  performances: new Set(),// by id
+  checkins: new Set()     // by actor_name
+};
+
+function queueCharacterPush(name) {
+  if (!sb || !currentUserIsAdmin) return;
+  adminPushQueue.characters.add(name);
+  schedulePush();
+}
+function queueScenePush(sceneId) {
+  if (!sb || !currentUserIsAdmin) return;
+  adminPushQueue.scenes.add(sceneId);
+  schedulePush();
+}
+function queuePerformancePush(perfId) {
+  if (!sb || !currentUserIsAdmin) return;
+  adminPushQueue.performances.add(perfId);
+  schedulePush();
+}
+function queueCheckinPush(actorName) {
+  if (!sb || !currentUserIsAdmin) return;
+  adminPushQueue.checkins.add(actorName);
+  schedulePush();
 }
 
 async function loadFromSupabase() {
