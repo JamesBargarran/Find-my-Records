@@ -4620,11 +4620,28 @@ function updateUserChip() {
   if (!chip) return;
   if (currentUser) {
     chip.style.display = 'inline-flex';
-    $('#userEmail').textContent = currentUser.email || '';
-    $('#userBadge').style.display = currentUserIsAdmin ? 'inline-block' : 'none';
+    chip.innerHTML = `
+      <span id="userEmail">${currentUser.email || ''}</span>
+      ${currentUserIsAdmin ? '<span class="badge-admin">ADMIN</span>' : ''}
+      <button id="logoutBtn" type="button">로그아웃</button>
+    `;
+    document.getElementById('logoutBtn')?.addEventListener('click', handleLogout);
   } else {
     chip.style.display = 'none';
   }
+}
+
+function updateGuestChip() {
+  const chip = document.getElementById('userChip');
+  if (!chip) return;
+  chip.style.display = 'inline-flex';
+  chip.innerHTML = `
+    <span style="color: var(--ink-faint); font-size: 9px; letter-spacing: 0.15em;">열람 전용</span>
+    <button id="guestLoginBtn" type="button">로그인 · 기록하기</button>
+  `;
+  document.getElementById('guestLoginBtn')?.addEventListener('click', () => {
+    showAuthOverlay(true);
+  });
 }
 
 // === Supabase data sync ===
@@ -5074,22 +5091,40 @@ async function bootApp() {
 
   // Check existing session
   const { data: { session } } = await sb.auth.getSession();
-  if (!session) {
-    showAuthOverlay(true);
-    return;
-  }
 
-  currentUser = session.user;
-  currentUserIsAdmin = !!(session.user?.user_metadata?.is_admin);
-  showAuthOverlay(false);
-  updateUserChip();
-
-  // Load from Supabase before rendering
-  try {
-    await loadFromSupabase();
-  } catch (err) {
-    console.error('Supabase load failed', err);
-    showToast('클라우드 동기화 실패 — 로컬 데이터로 계속합니다');
+  if (session) {
+    // Logged in
+    currentUser = session.user;
+    currentUserIsAdmin = !!(session.user?.user_metadata?.is_admin);
+    showAuthOverlay(false);
+    updateUserChip();
+    try {
+      await loadFromSupabase();
+    } catch (err) {
+      console.error('Supabase load failed', err);
+      showToast('클라우드 동기화 실패 — 로컬 데이터로 계속합니다');
+    }
+  } else {
+    // Guest — load seed data in read-only mode
+    showAuthOverlay(false);
+    updateGuestChip();
+    try {
+      const seed = await fetchSeedFromSupabase();
+      if (seed) {
+        if (seed.characters.length > 0) state.characters = reorderCharacters(seed.characters);
+        if (seed.scenes.length > 0) state.scenes = seed.scenes.sort((a, b) => (a.sortIdx ?? 999) - (b.sortIdx ?? 999));
+        if (seed.performances.length > 0) {
+          state.visits = seed.performances.map(p => ({
+            ...p, isWatched: false, entries: [],
+            createdAt: Date.now(), updatedAt: Date.now(), source: 'seed_perf'
+          }));
+        }
+        state.performerCheckins = seed.performer_checkins || {};
+        saveState();
+      }
+    } catch (err) {
+      console.error('Guest seed load failed', err);
+    }
   }
   runApp();
 }
@@ -5123,7 +5158,9 @@ if (SUPABASE_ENABLED) {
         } else if (event === 'SIGNED_OUT') {
           currentUser = null;
           currentUserIsAdmin = false;
-          updateUserChip();
+          updateGuestChip();
+          // Reload to reset to guest mode
+          location.reload();
         }
       });
     }
